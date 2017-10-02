@@ -204,6 +204,7 @@ function processEvent (event, context, callback) {
       }
       return compareIdsForInsert();
     })
+    .then(translateToFeatureJson)
     .then(insertEdits)
     .then((response) => {
       let message;
