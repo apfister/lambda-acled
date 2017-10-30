@@ -42,7 +42,7 @@ const getToken = function () {
 const getUpdatedAcledData = function () {
   const fourteenDaysAgo = moment().subtract(14, 'days').format('YYYY-MM-DD');
 
-  const apiUrl = `https://api.acleddata.com/acled/read?event_date=${fourteenDaysAgo}&event_date_where=%3E=`;
+  const apiUrl = `https://api.acleddata.com/acled/read?event_date=${fourteenDaysAgo}&event_date_where=%3E=&limit=0`;
 
   const acledParams = {
     method: 'GET',
