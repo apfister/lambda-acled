@@ -1,104 +1,25 @@
+require('isomorphic-fetch');
+require('isomorphic-form-data');
+
 const AWS = require('aws-sdk');
-const rp = require('request-promise-native');
 const moment = require('moment');
+const featureService = require('@esri/arcgis-rest-feature-service');
+const restAuth = require('@esri/arcgis-rest-auth');
 
 const encrypted = {
   service_user: process.env['service_user'],
   service_pass: process.env['service_pass']
 };
 
-const liveFeatureServiceUrl = 'https://services.arcgis.com/LG9Yn2oFqZi5PnO5/arcgis/rest/services/Armed_Conflict_Location_Event_Data_ACLED/FeatureServer/0';
-
 let decrypted = {};
 
-let token;
+const liveFeatureServiceUrl = 'https://services.arcgis.com/LG9Yn2oFqZi5PnO5/arcgis/rest/services/Armed_Conflict_Location_Event_Data_ACLED/FeatureServer/0';
 
-let acledData;
+let _SESSION;
+let _ACLEDDATA;
 
-const getToken = function () {
-  const tokenParams = {
-    method: 'POST',
-    uri: 'https://www.arcgis.com/sharing/rest/generateToken',
-    json: true,
-    formData: {
-      username: decrypted.service_user,
-      password: decrypted.service_pass,
-      referer: 'http://www.arcgis.com',
-      f: 'json'
-    }
-  };
-
-  return rp(tokenParams)
-    .then((response) => {
-      if (response.error) {
-        throw new Error(response.error.message);
-      }
-      token = response.token;
-    });
-};
-
-const getUpdatedAcledData = function () {
-  const fourteenDaysAgo = moment().subtract(14, 'days').format('YYYY-MM-DD');
-
-  const apiUrl = `https://api.acleddata.com/acled/read?event_date=${fourteenDaysAgo}&event_date_where=%3E=&limit=0`;
-
-  const acledParams = {
-    method: 'GET',
-    uri: apiUrl,
-    json: true
-  };
-
-  return rp(acledParams)
-    .then((response) => {
-      if (!response.data) {
-        throw new Error('no response data returned from ACLED API');
-      } else if (response.count === 0 || response.data.length === 0) {
-        throw new Error(`no data from ACLED using URL :: ${apiUrl}`);
-      } else {
-        acledData = response.data;
-      }
-    });
-};
-
-const deleteLiveFeatures = function () {
-  const deleteParams = {
-    method: 'POST',
-    uri: `${liveFeatureServiceUrl}/deleteFeatures`,
-    json: true,
-    qs: {
-      token: token
-    },
-    form: {
-      where: '1=1',
-      f: 'json'
-    }
-  };
-  return rp(deleteParams);
-};
-
-const insertLiveFeatures = function (adds) {
-  const addParams = {
-    method: 'POST',
-    uri: `${liveFeatureServiceUrl}/applyEdits`,
-    json: true,
-    qs: {
-      token: token
-    },
-    form: {
-      adds: JSON.stringify(adds),
-      updates: null,
-      deletes: null,
-      attachments: null,
-      rollbackOnFailure: false,
-      useGlobalIds: false,
-      f: 'json'
-    }
-  };
-  return rp(addParams);
-};
-
-const translateToFeatureJson = function (data) {
-  return data.map((event) => {
+const translateToFeatureJson = (data) => {
+  return data.map(event => {
     return {
       geometry: {
         x: parseFloat(event.longitude),
@@ -140,28 +61,86 @@ const translateToFeatureJson = function (data) {
   });
 };
 
-function processEvent (event, context, callback) {
-  return getToken()
-    .then(getUpdatedAcledData)
+const getLiveAcledData = () => {
+  const fourteenDaysAgo = moment().subtract(14, 'days').format('YYYY-MM-DD');
+  const apiUrl = `https://api.acleddata.com/acled/read?event_date=${fourteenDaysAgo}&event_date_where=%3E=&limit=0`;
+
+  console.log('requesting data from ACLED API ..');
+  console.log(`ACLED API request URL :: ${apiUrl}`);
+
+  return fetch(apiUrl)
+    .then(response => response.json())
+    .then(responseData => {
+      if (!responseData) {
+        throw new Error('no response data returned from ACLED API');
+      } else if (responseData.count === 0 || responseData.data.length === 0) {
+        throw new Error('no features from ACLED API returned. exiting ..');
+      } else {
+        _ACLEDDATA = translateToFeatureJson(responseData.data);
+        return Promise.resolve();
+      }
+    });
+};
+
+const deleteLiveFeatures = () => {
+  console.log('deleting features ..');
+  const deleteParams = {
+    url: liveFeatureServiceUrl,
+    params: { where: '1=1' },
+    authentication: _SESSION
+  };
+  return featureService.deleteFeatures(deleteParams)
+    .catch((error) => {
+      throw new Error(error);
+    });
+};
+
+const insertLiveFeatures = () => {
+  console.log('inserting features ..');
+  const addParams = {
+    url: liveFeatureServiceUrl,
+    adds: _ACLEDDATA,
+    authentication: _SESSION
+  };
+  return featureService.addFeatures(addParams)
+    .catch((error) => {
+      throw new Error(error);
+    });
+};
+
+const initAuth = () => {
+  return new Promise((resolve, reject) => {
+    _SESSION = new restAuth.UserSession({
+      username: decrypted.service_user,
+      password: decrypted.service_pass
+    });
+
+    if (!_SESSION) {
+      reject(new Error('unable to get authentication setup'));
+    }
+
+    resolve();
+  });
+};
+
+const processEvent = (event, context, callback) => {
+  initAuth()
+    .then(getLiveAcledData)
     .then(deleteLiveFeatures)
-    .then((response) => {
-      return translateToFeatureJson(acledData);
-    })
     .then(insertLiveFeatures)
-    .then((response) => {
-      let message;
+    .then(response => {
+      let message = '';
       if (response && response.addResults) {
         message = `successfully added ${response.addResults.length}`;
-        callback(null, message);
       } else {
-        message = 'unable to insert features ..wtf?';
-        callback(message);
+        message = 'unable to insert features';
       }
+      callback(null, message);
     })
-    .catch((err) => {
-      callback(err);
+    .catch(error => {
+      callback(error);
     });
-}
+};
 
 exports.handler = (event, context, callback) => {
   if (decrypted.service_user && decrypted.service_pass) {
